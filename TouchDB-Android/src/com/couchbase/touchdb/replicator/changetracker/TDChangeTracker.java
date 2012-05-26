@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -24,7 +25,11 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.Log;
 
+import com.couchbase.touchdb.TDBody;
 import com.couchbase.touchdb.TDDatabase;
+import com.couchbase.touchdb.TDServer;
+import com.couchbase.touchdb.router.TDRouter;
+import com.couchbase.touchdb.router.TDURLConnection;
 
 /**
  * Reads the continuous-mode _changes feed of a database, and sends the
@@ -47,6 +52,9 @@ public class TDChangeTracker implements Runnable {
 
     private String filterName;
     private Map<String, Object> filterParams;
+    private TDServer server;
+    
+    public static final String TAG = "TDChangeTracker";
 
     public enum TDChangeTrackerMode {
         OneShot, LongPoll, Continuous
@@ -146,39 +154,68 @@ public class TDChangeTracker implements Runnable {
         while (running) {
             request = new HttpGet(getChangesFeedURL().toString());
             try {
+            	StatusLine status = null;
+            	HttpEntity entity = null;
+            	int statucCode = 0;
+            	InputStream input = null;
                 Log.v(TDDatabase.TAG, "Making request to " + getChangesFeedURL().toString());
-                HttpResponse response = httpClient.execute(request);
-                StatusLine status = response.getStatusLine();
-                if(status.getStatusCode() >= 300) {
+                if (getChangesFeedURL().toString().startsWith("touchdb")) {
+                	//TDURLConnection conn = (TDURLConnection)getChangesFeedURL().openConnection();
+                    TDURLConnection conn = sendRequest(server, "GET", getChangesFeedPath(), null, null);
+                    statucCode = conn.getResponseCode();
+                    TDBody fullBody = conn.getResponseBody();
+                    boolean responseOK = receivedPollResponse(fullBody.getProperties());
+                    if(mode == TDChangeTrackerMode.LongPoll && responseOK) {
+                        Log.v(TDDatabase.TAG, "Starting new longpoll");
+                        continue;
+                    } else {
+                        Log.w(TDDatabase.TAG, "Change tracker calling stop");
+                        stop();
+                    }
+                } else {
+                	HttpResponse response = httpClient.execute(request);
+                    status = response.getStatusLine();
+                    entity = response.getEntity();
+                    input = entity.getContent();
+                    statucCode = status.getStatusCode();
+                    
+                    if(input != null) {
+                    	try {
+    	                    if(mode != TDChangeTrackerMode.Continuous) {
+    	                        Map<String,Object> fullBody = mapper.readValue(input, Map.class);
+    	                        boolean responseOK = receivedPollResponse(fullBody);
+    	                        if(mode == TDChangeTrackerMode.LongPoll && responseOK) {
+    	                            Log.v(TDDatabase.TAG, "Starting new longpoll");
+    	                            continue;
+    	                        } else {
+    	                            Log.w(TDDatabase.TAG, "Change tracker calling stop");
+    	                            stop();
+    	                        }
+    	                    }
+    	                    else {
+    	                        BufferedReader reader = new BufferedReader(new InputStreamReader(input));
+    	                        String line = null;
+    	                        while ((line=reader.readLine()) != null) {
+    	                            receivedChunk(line);
+    	                        }
+    	                    }
+                    	} finally {
+    						try {
+    							//entity.consumeContent();
+    							if (entity != null) {
+    								entity.consumeContent();
+    							}
+    							
+    						} catch (IOException e) {
+    						}
+                    	}
+                    }
+                }
+                if(statucCode >= 300) {
                     Log.e(TDDatabase.TAG, "Change tracker got error " + Integer.toString(status.getStatusCode()));
                     stop();
                 }
-                HttpEntity entity = response.getEntity();
-                if(entity != null) {
-                	try {
-	                    InputStream input = entity.getContent();
-	                    if(mode != TDChangeTrackerMode.Continuous) {
-	                        Map<String,Object> fullBody = mapper.readValue(input, Map.class);
-	                        boolean responseOK = receivedPollResponse(fullBody);
-	                        if(mode == TDChangeTrackerMode.LongPoll && responseOK) {
-	                            Log.v(TDDatabase.TAG, "Starting new longpoll");
-	                            continue;
-	                        } else {
-	                            Log.w(TDDatabase.TAG, "Change tracker calling stop");
-	                            stop();
-	                        }
-	                    }
-	                    else {
-	                        BufferedReader reader = new BufferedReader(new InputStreamReader(input));
-	                        String line = null;
-	                        while ((line=reader.readLine()) != null) {
-	                            receivedChunk(line);
-	                        }
-	                    }
-                	} finally {
-                		try { entity.consumeContent(); } catch (IOException e){}
-                	}
-                }
+
             } catch (ClientProtocolException e) {
                 Log.e(TDDatabase.TAG, "ClientProtocolException in change tracker", e);
             } catch (IOException e) {
@@ -286,6 +323,45 @@ public class TDChangeTracker implements Runnable {
 
     public boolean isRunning() {
         return running;
+    }
+
+	public TDServer getServer() {
+		return server;
+	}
+
+	public void setServer(TDServer server) {
+		this.server = server;
+	}
+	
+	//private ObjectMapper mapper = new ObjectMapper();
+
+    protected TDURLConnection sendRequest(TDServer server, String method, String path, Map<String,String> headers, Object bodyObj) {
+        try {
+            URL url = new URL("touchdb://" + path);
+            TDURLConnection conn = (TDURLConnection)url.openConnection();
+            conn.setDoOutput(true);
+            conn.setRequestMethod(method);
+            if(headers != null) {
+                for (String header : headers.keySet()) {
+                    conn.setRequestProperty(header, headers.get(header));
+                }
+            }
+            Map<String, List<String>> allProperties = conn.getRequestProperties();
+            if(bodyObj != null) {
+                conn.setDoInput(true);
+                OutputStream os = conn.getOutputStream();
+                os.write(mapper.writeValueAsBytes(bodyObj));
+            }
+
+            TDRouter router = new TDRouter(server, conn);
+            router.start();
+            return conn;
+        } catch (MalformedURLException e) {
+        	Log.e(TAG, "Bad URL: ", e);
+        } catch(IOException e) {
+        	Log.e(TAG, "I/O Exception: ", e);
+        }
+        return null;
     }
 
 }

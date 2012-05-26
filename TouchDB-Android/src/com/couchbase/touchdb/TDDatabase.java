@@ -19,6 +19,7 @@ package com.couchbase.touchdb;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -30,6 +31,8 @@ import java.util.Map;
 import java.util.Observable;
 import java.util.Set;
 
+import org.apache.http.client.HttpClient;
+import org.apache.http.impl.client.DefaultHttpClient;
 import org.codehaus.jackson.map.ObjectMapper;
 
 import android.content.ContentValues;
@@ -43,6 +46,9 @@ import com.couchbase.touchdb.TDDatabase.TDContentOptions;
 import com.couchbase.touchdb.replicator.TDPuller;
 import com.couchbase.touchdb.replicator.TDPusher;
 import com.couchbase.touchdb.replicator.TDReplicator;
+import com.couchbase.touchdb.replicator.changetracker.TDChangeTracker;
+import com.couchbase.touchdb.replicator.changetracker.TDChangeTrackerClient;
+import com.couchbase.touchdb.replicator.changetracker.TDChangeTracker.TDChangeTrackerMode;
 import com.couchbase.touchdb.support.Base64;
 import com.couchbase.touchdb.support.FileDirUtils;
 import com.couchbase.touchdb.support.HttpClientFactory;
@@ -66,6 +72,8 @@ public class TDDatabase extends Observable {
     private Map<String, TDValidationBlock> validations;
     private List<TDReplicator> activeReplicators;
     private TDBlobStore attachments;
+    private boolean tracksChanges;
+    private TDChangeTracker tracker;
 
     /**
      * Options for what metadata to include in document bodies
@@ -2477,6 +2485,23 @@ public class TDDatabase extends Observable {
             return new TDStatus(TDStatus.INTERNAL_SERVER_ERROR);
         }
     }
+
+	public boolean isTracksChanges() {
+		tracksChanges = (tracker != null);
+		return tracksChanges;
+	}
+
+	public void setTracksChanges(boolean tracksChanges) {
+		this.tracksChanges = tracksChanges;   
+	}
+
+	public TDChangeTracker getTracker() {
+		return tracker;
+	}
+
+	public void setTracker(TDChangeTracker tracker) {
+		this.tracker = tracker;
+	}
 }
 
 class TDValidationContextImpl implements TDValidationContext {
